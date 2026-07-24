@@ -8,6 +8,10 @@ Five new tools that complement the typed_tools.py inventory:
   P4 reverse_callers            — who calls a routine, with owner filter
   P5 form_binding_summary       — per-form bound/unbound control counts
 
+All five tools RETURN PYTHON DICTS (not JSON strings) so the LLM can read
+them directly without parsing. Parameters have Annotated descriptions for
+better discoverability via tools/list.
+
 All five work across all 42 metadata categories and across multiple 1C
 projects (parameterised through env vars PROJECT_NAME / NEO4J_HTTP_URL
 / NEO4J_PASSWORD / CONFIG_NAME, never hard-coded).
@@ -25,7 +29,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from config import settings
 
@@ -71,12 +75,7 @@ def _neo4j_password() -> str:
 
 
 def _config_prefix(project_name: Optional[str] = None) -> str:
-    """Build qualified_name prefix like 'unf/УправлениеНебольшойФирмой/'.
-
-    Uses env PROJECT_NAME (or override) and CONFIG_NAME (default for УНФ).
-    Every Cypher filter that needs to scope by project should use this via
-    the $config_prefix parameter — never literal 'unf/' or 'erp/' strings.
-    """
+    """Build qualified_name prefix like 'unf/УправлениеНебольшойФирмой/'."""
     pn = project_name or _project_name()
     cfg = os.environ.get("CONFIG_NAME", "УправлениеНебольшойФирмой")
     return f"{pn}/{cfg}/"
@@ -137,35 +136,32 @@ def _http_run_cypher(query: str, params: Dict[str, Any], timeout_sec: int) -> Di
 
 def _register_cypher_query(mcp):
     def cypher_query(
-        query: str,
-        params: Optional[Dict[str, Any]] = None,
-        limit: int = 100,
-        timeout_sec: int = 30,
-        project_name: Optional[str] = None,
-    ) -> str:
+        query: Annotated[str, "The Cypher query to execute. Write operations (CREATE/MERGE/DELETE/SET/REMOVE/DROP/apoc.write) are blocked."],
+        params: Annotated[Optional[Dict[str, Any]], "Named parameters the Cypher query uses via $param syntax."] = None,
+        limit: Annotated[int, "Safety cap — auto-appended as LIMIT if the query has no LIMIT after RETURN. Pass 0 for no limit (max 1000)."] = 100,
+        timeout_sec: Annotated[int, "HTTP request timeout in seconds. Max 120."] = 30,
+        project_name: Annotated[Optional[str], "Override the PROJECT_NAME env. Use when querying across project boundaries or extensions."] = None,
+    ) -> Dict[str, Any]:
         """Execute a READ-ONLY Cypher query against Neo4j.
 
-        Write operations are blocked (CREATE / MERGE / DELETE / SET /
-        REMOVE / DROP / apoc.write). If a query has no LIMIT clause,
-        one is appended automatically up to `limit` (default 100, max 1000).
+        USE WHEN: you need ad-hoc graph queries, aggregations, counts, or
+        direct Neo4j access not covered by the 26 typed tools.
 
-        Pass `$project_name` inside the query and it will be filled in
-        from the current PROJECT_NAME env var (or the override you pass).
+        - Write operations are blocked (CREATE / MERGE / DELETE / SET / REMOVE / DROP / apoc.write).
+        - Auto-appends LIMIT if the last RETURN clause lacks one.
+        - Pass `$project_name` inside the query to scope by the current project.
 
-        Returns JSON: {"columns":[...], "rows":[[...]], "row_count": N,
-                       "truncated": bool, "execution_ms": int}.
+        Returns: {columns, rows, row_count, truncated, execution_ms}.
+        On error: {error: "message"}.
         """
         params = dict(params or {})
         try:
             if FORBIDDEN_PATTERNS.search(query):
-                return json.dumps(
-                    {
-                        "error": "Write operations are blocked in cypher_query. "
-                        "Allowed: MATCH/RETURN/WITH/UNWIND/OPTIONAL/CALL (non-write apoc). "
-                        "Use the dedicated write endpoints or direct Neo4j access for mutations."
-                    },
-                    ensure_ascii=False,
-                )
+                return {
+                    "error": "Write operations are blocked in cypher_query. "
+                    "Allowed: MATCH/RETURN/WITH/UNWIND/OPTIONAL/CALL (non-write apoc). "
+                    "Use the dedicated write endpoints or direct Neo4j access for mutations."
+                }
             try:
                 lim = max(1, min(MAX_LIMIT, int(limit)))
             except Exception:
@@ -187,14 +183,19 @@ def _register_cypher_query(mcp):
             out = _http_run_cypher(query, params, timeout_eff)
             out["truncated"] = out["row_count"] >= lim
             out["execution_ms"] = int((time.time() - t0) * 1000)
-            return json.dumps(out, ensure_ascii=False, default=str)
+            return out
         except urllib.error.URLError as e:
-            return json.dumps({"error": f"Neo4j HTTP error: {e}"}, ensure_ascii=False)
+            return {"error": f"Neo4j HTTP error: {e}"}
         except Exception as e:
             logger.exception("cypher_query failed")
-            return json.dumps({"error": f"cypher_query failed: {e}"}, ensure_ascii=False)
+            return {"error": f"cypher_query failed: {e}"}
 
-    cypher_query.__doc__ = """Execute a READ-ONLY Cypher query against Neo4j. Write ops are blocked. Pass `$project_name` to scope by current PROJECT_NAME env."""
+    cypher_query.__doc__ = (
+        "Execute a READ-ONLY Cypher query against Neo4j. "
+        "Write ops are blocked. "
+        "Pass `$project_name` to scope by current PROJECT_NAME env. "
+        "Returns {columns, rows, row_count, truncated, execution_ms}."
+    )
     mcp.tool()(cypher_query)
 
 
@@ -204,44 +205,43 @@ def _register_cypher_query(mcp):
 
 def _register_batch_dependency_resolve(mcp):
     def batch_dependency_resolve(
-        attribute_name: Optional[str] = None,
-        object_filter: Optional[str] = None,
-        routine_filter: Optional[str] = None,
-        relationship: str = "BINDS_TO",
-        from_side: str = "FormControl",
-        to_side: str = "Attribute",
-        depth: int = 1,
-        limit: int = 100,
-        project_name: Optional[str] = None,
-    ) -> str:
+        attribute_name: Annotated[Optional[str], "Exact name of the target attribute/resource/dimension to find. Example: 'Организация', 'Контрагент', 'Период'."] = None,
+        object_filter: Annotated[Optional[str], "Regex over the source object's qualified_name. Example: 'РасходнаяНакладная' or '^.*Справочники.*$'. Use to narrow results to a specific object."] = None,
+        routine_filter: Annotated[Optional[str], "Regex over the target routine name. Only applies when to_side=Routine."] = None,
+        relationship: Annotated[str, "Edge type to follow. Common values: BINDS_TO (default), CALLS, USED_IN, DO_MOVEMENTS_IN."] = "BINDS_TO",
+        from_side: Annotated[str, "Label of the start node. Default: FormControl. Alternative: Attribute, Routine, Document, etc."] = "FormControl",
+        to_side: Annotated[str, "Label of the target node. Default: Attribute. Alternative: Routine, Dimension, Resource, etc."] = "Attribute",
+        depth: Annotated[int, "How many hops along the edge to traverse. 1 = direct relations (default). Max 3 — higher depths may be slow on large configs (298K routines)."] = 1,
+        limit: Annotated[int, "Max rows returned. Auto-reduced to 20 for broad queries without attribute_name/object_filter. Max 1000."] = 100,
+        project_name: Annotated[Optional[str], "Override PROJECT_NAME to search in another config or extension."] = None,
+    ) -> Dict[str, Any]:
         """Resolve a batch of graph joins in one call.
 
-        Default: find all FormControl -[BINDS_TO]-> Attribute/FormAttribute
-        pairs (works for any category that has attributes — that's all 42).
+        USE WHEN: you need to find all forms/external objects that reference
+        a specific field (e.g. `Организация`), or trace relationships between
+        any node types across the graph.
 
-        Filters:
-          - attribute_name : exact match on target attribute name
-          - object_filter  : regex on owner qualified_name (e.g. '^.*Расходная.*$')
-          - routine_filter : regex on routine name (when routine/routine-side used)
-          - relationship   : any relationship type (BINDS_TO, CALLS, USED_IN, ...)
-          - from_side / to_side : any node label (FormControl, Attribute, Routine...)
-          - depth          : 1 hop (default) or more for multi-step joins
-          - limit          : safety cap (default 100, max 1000)
+        Default: FormControl -[BINDS_TO]-> Attribute (works across all 42 categories).
+        For categories without FormControl (Константы, Подсистемы, etc.),
+        try from_side='Attribute' with a different relationship.
 
-        Returns JSON array of {from_name, from_qn, to_name, to_qn, via_relationship}.
+        Returns: {count, truncated, relationship, from_side, to_side, depth,
+                  rows: [{from_name, from_qn, to_name, to_qn, via_relationship}],
+                  note?}.
+        On error: {error: "message"}.
         """
         loader = _init_loader()
         if loader is None:
-            return json.dumps({"error": "Neo4j connection not available."}, ensure_ascii=False)
+            return {"error": "Neo4j connection not available."}
         try:
             pn = _resolve_project(project_name)
         except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
         try:
             lim = max(1, min(MAX_LIMIT, int(limit)))
         except Exception:
             lim = 100
-        
+
         # Auto-reduce limit for broad queries (no object_filter) to prevent
         # overwhelming the response with thousands of rows.
         broad_query = (not attribute_name and not object_filter)
@@ -316,12 +316,18 @@ LIMIT $limit
                     out["note"] += " | " + zero_note
                 else:
                     out["note"] = zero_note
-            return json.dumps(out, ensure_ascii=False, default=str)
+            return out
         except Exception as e:
             logger.exception("batch_dependency_resolve failed")
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
 
-    batch_dependency_resolve.__doc__ = """Resolve a batch of graph joins in one call. Works on all 42 categories. Default = FormControl→Attribute BINDS_TO. Filters: attribute_name (exact), object_filter / routine_filter (regex)."""
+    batch_dependency_resolve.__doc__ = (
+        "Resolve a batch of graph joins in one call. "
+        "Works on all 42 categories. "
+        "Default = FormControl\xe2\x86\x92Attribute BINDS_TO. "
+        "Filters: attribute_name (exact), object_filter / routine_filter (regex). "
+        "Returns {count, rows, note?}."
+    )
     mcp.tool()(batch_dependency_resolve)
 
 
@@ -331,30 +337,34 @@ LIMIT $limit
 
 def _register_routine_subgraph(mcp):
     def routine_subgraph(
-        routine_id: str,
-        callee_name_filter: Optional[str] = None,
-        callee_owner_filter: Optional[str] = None,
-        direction: str = "callees",
-        depth: int = 1,
-        limit: int = 50,
-        project_name: Optional[str] = None,
-    ) -> str:
-        """Routine call subgraph with regex filters.
+        routine_id: Annotated[str, "40-character SHA-1 hex ID of the routine (from get_bsl_routine_body or search_bsl_routines)."],
+        callee_name_filter: Annotated[Optional[str], "Regex over callee routine names. Example: 'ОтразитьДвижения' to find only entries calling that pattern."] = None,
+        callee_owner_filter: Annotated[Optional[str], "Regex over callee owner qualified_name. Example: '^.*ОбщиеМодули.*$' to scope callees to general modules."] = None,
+        direction: Annotated[str, "Which way to follow CALLS edges. 'callees' = routines this one calls; 'callers' = routines that call this one; 'both' = merge both."] = "callees",
+        depth: Annotated[int, "How many CALLS hops. 1 = immediate (default). 2-3 for transitive calls — use with limit to avoid large results."] = 1,
+        limit: Annotated[int, "Max path results. Each path includes all nodes and edges within the depth."] = 50,
+        project_name: Annotated[Optional[str], "Override PROJECT_NAME to scope the search to another config or extension."] = None,
+    ) -> Dict[str, Any]:
+        """Routine call subgraph with regex filters on callee/caller name and owner_qn.
 
-        direction ∈ {callees, callers, both}. Filters apply to the
-        far end of the relationship. depth=1 is default (immediate
-        callers/callees); raise to 2-3 for broader subgraphs but be
-        mindful of result-set size (298K routines in unf).
+        USE WHEN: you need to trace which routines a specific procedure calls
+        (callees) or who calls it (callers). Start with get_bsl_routine_body
+        to obtain the routine_id, then call this tool.
 
-        Returns JSON: {nodes:[{id,name,owner_qn}], edges:[{from,to,rel}], count}.
+        direction ∈ {callees (default), callers, both}.
+        depth=1 for immediate calls; raise to 2-3 for transitive chains.
+
+        Returns: {count_nodes, count_edges, direction, depth,
+                  nodes: [{id, name, owner_qn}], edges: [{from, to, rel}]}.
+        On error: {error: "message"}.
         """
         loader = _init_loader()
         if loader is None:
-            return json.dumps({"error": "Neo4j connection not available."}, ensure_ascii=False)
+            return {"error": "Neo4j connection not available."}
         try:
             pn = _resolve_project(project_name)
         except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
         try:
             lim = max(1, min(MAX_LIMIT, int(limit)))
         except Exception:
@@ -364,20 +374,13 @@ def _register_routine_subgraph(mcp):
         except Exception:
             depth_eff = 1
         if direction not in ("callees", "callers", "both"):
-            return json.dumps(
-                {"error": f"direction must be one of callers/callees/both, got '{direction}'"},
-                ensure_ascii=False,
-            )
+            return {"error": f"direction must be one of callers/callees/both, got '{direction}'"}
 
         # Validate routine_id: Neo4j requires literal interpolation here because
-        # parameter maps in MATCH path patterns are not supported. We whitelist
-        # SHA-1 hex IDs (40 characters) to prevent Cypher injection.
+        # parameter maps in MATCH path patterns are not supported.
         _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.I)
         if not _SHA_RE.match(routine_id):
-            return json.dumps(
-                {"error": f"routine_id must be a 40-character SHA-1 hex string, got '{routine_id[:20]}...'"},
-                ensure_ascii=False,
-            )
+            return {"error": f"routine_id must be a 40-character SHA-1 hex string, got '{routine_id[:20]}...'"}
 
         # direction = forward (callees) or backward (callers). For both we
         # run two queries and merge; Cypher's variadic path patterns don't
@@ -465,12 +468,16 @@ LIMIT $limit
                 "nodes": unique_nodes[:lim],
                 "edges": unique_edges[:lim],
             }
-            return json.dumps(out, ensure_ascii=False, default=str)
+            return out
         except Exception as e:
             logger.exception("routine_subgraph failed")
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
 
-    routine_subgraph.__doc__ = """Routine call subgraph with regex filters on callee/caller name and owner_qn. direction=callees|callers|both, depth=1..3."""
+    routine_subgraph.__doc__ = (
+        "Routine call subgraph with regex filters on callee/caller name and owner_qn. "
+        "direction=callees|callers|both, depth=1..3. "
+        "Returns {count_nodes, count_edges, nodes, edges}."
+    )
     mcp.tool()(routine_subgraph)
 
 
@@ -480,29 +487,33 @@ LIMIT $limit
 
 def _register_reverse_callers(mcp):
     def reverse_callers(
-        routine_name: str,
-        routine_owner_filter: Optional[str] = None,
-        caller_owner_filter: Optional[str] = None,
-        limit: int = 50,
-        project_name: Optional[str] = None,
-    ) -> str:
-        """Find callers of routines named `routine_name`, optionally filtered
-        by routine owner_qn (e.g. '^.*РасходнаяНакладная$') and caller
-        owner_qn (regex).
+        routine_name: Annotated[str, "Exact name of the routine to find callers for. Example: 'ОбработкаПроведения', 'ПроведениеДокументовУНФ'. Case-sensitive."],
+        routine_owner_filter: Annotated[Optional[str], "Regex over the called routine's owner qualified_name. Example: '^.*РасходнаяНакладная$' to scope which object's routine to look up."] = None,
+        caller_owner_filter: Annotated[Optional[str], "Regex over the caller's owner qualified_name. Example: '^.*ОбщиеМодули.*$' to find callers only from common modules."] = None,
+        limit: Annotated[int, "Max caller rows. Max 1000."] = 50,
+        project_name: Annotated[Optional[str], "Override PROJECT_NAME to search in another config or extension."] = None,
+    ) -> Dict[str, Any]:
+        """Find callers of routines by name, with owner regex filters.
 
-        Note: routine handlers like `ОбработкаПроведения` are wired through
-        event subscriptions, not CALLS — so this tool returns 0 rows for
-        them by design. Use find_dependency_paths for those cases.
+        USE WHEN: you want to know which routines directly CALL a named
+        procedure across the project. Unlike routine_subgraph, this is
+        strictly one level deep — all callers, no subgraph expansion.
 
-        Returns JSON array of {caller_name, caller_owner, caller_id, called_name, called_owner}.
+        NOTE: Event-handler routines like 'ОбработкаПроведения' are wired
+        through event subscriptions (not CALLS edges), so they return 0 rows
+        by design. Use get_event_subscriptions or find_dependency_paths instead.
+
+        Returns: {count, routine_name, rows: [{caller_id, caller_name,
+                  caller_owner, called_name, called_owner}], note?}.
+        On error: {error: "message"}.
         """
         loader = _init_loader()
         if loader is None:
-            return json.dumps({"error": "Neo4j connection not available."}, ensure_ascii=False)
+            return {"error": "Neo4j connection not available."}
         try:
             pn = _resolve_project(project_name)
         except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
         try:
             lim = max(1, min(MAX_LIMIT, int(limit)))
         except Exception:
@@ -549,12 +560,17 @@ LIMIT $limit
                     "edges — this is expected. Use get_event_subscriptions or "
                     "find_dependency_paths to trace their callers."
                 )
-            return json.dumps(out, ensure_ascii=False, default=str)
+            return out
         except Exception as e:
             logger.exception("reverse_callers failed")
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
 
-    reverse_callers.__doc__ = """Find routines that CALL routines named `routine_name`. Filters by owner_qn regex (e.g. '^.*РасходнаяНакладная$'). Returns 0 for event-handler routines (by design)."""
+    reverse_callers.__doc__ = (
+        "Find routines that CALL routines named `routine_name`. "
+        "Filters by owner_qn regex. "
+        "Returns 0 for event-handler routines (by design). "
+        "Returns {count, routine_name, rows, note?}."
+    )
     mcp.tool()(reverse_callers)
 
 
@@ -564,44 +580,45 @@ LIMIT $limit
 
 def _register_form_binding_summary(mcp):
     def form_binding_summary(
-        object_name: str,
-        form_name: Optional[str] = None,
-        project_name: Optional[str] = None,
-    ) -> str:
+        object_name: Annotated[str, "Metadata object in 'Category.Name' format. Examples: 'Документы.РасходнаяНакладная', 'Справочники.Контрагенты', 'Константы.АвтоПодборНомеровГТД'. Works on any of the 42 categories."],
+        form_name: Annotated[Optional[str], "Optional form name to limit the summary to one form. Example: 'ФормаДокумента', 'ФормаСписка'. Omit for all forms of the object."] = None,
+        project_name: Annotated[Optional[str], "Override PROJECT_NAME for extension objects (e.g. 'MCP_Сервер$ext$')."] = None,
+    ) -> Dict[str, Any]:
         """Per-form aggregate: total controls, bound, unbound, bound %.
 
+        USE WHEN: you need a quick overview of how many form controls are
+        bound to metadata attributes vs. unbound (static/decorative). Useful
+        for form audit, classification coverage analysis, or finding
+        orphaned controls.
+
         `object_name` accepts any of the 42 metadata categories:
-          'Документы.РасходнаяНакладная'
-          'Справочники.Контрагенты'
-          'Константы.АвтоПодборНомеровГТД'   (no form, returns empty + note)
-          'Подсистемы.Продажи'                (no form, returns empty + note)
-          'MCP_Сервер$ext$.Обработки.<X>'     (extension objects)
+          'Документы.РасходнаяНакладная'    — forms: ФормаДокумента, ФормаСписка, ...
+          'Справочники.Контрагенты'         — forms: ФормаЭлемента, ФормаСписка, ...
+          'Константы.АвтоПодборНомеровГТД' — no forms → {forms: [], note: "..."}
+          'Подсистемы.Продажи'              — no forms → note with category-specific hint
 
-        Categories without Form return a valid empty result with an
-        explanatory note — no exception.
-
-        Returns JSON: {object_name, category, forms:[{form_name, total, bound, unbound, bound_pct}], note?}.
+        Returns: {object_name, category, qualified_name,
+                  forms: [{form_name, total, bound, unbound, bound_pct}],
+                  note?}.
+        On error: {error: "message"}.
         """
         loader = _init_loader()
         if loader is None:
-            return json.dumps({"error": "Neo4j connection not available."}, ensure_ascii=False)
+            return {"error": "Neo4j connection not available."}
         try:
             pn = _resolve_project(project_name)
         except Exception as e:
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
 
         try:
             resolved = resolve_object_ref(loader, object_name, pn, None)
         except ValueError as e:
-            return json.dumps({"error": f"object not found: {e}"}, ensure_ascii=False)
+            return {"error": f"object not found: {e}"}
 
         category = resolved.get("category_name", "")
         qn = resolved.get("qualified_name", "")
         if not qn:
-            return json.dumps(
-                {"error": f"Could not resolve '{object_name}' to a qualified_name"},
-                ensure_ascii=False,
-            )
+            return {"error": f"Could not resolve '{object_name}' to a qualified_name"}
 
         # Step 1: does this object have any Form nodes?
         cypher_forms = """
@@ -620,7 +637,7 @@ ORDER BY f.name
             ) or []
         except Exception as e:
             logger.exception("form_binding_summary form lookup failed")
-            return json.dumps({"error": str(e)}, ensure_ascii=False)
+            return {"error": str(e)}
 
         if not forms:
             # Contextual suggestions based on category
@@ -635,19 +652,16 @@ ORDER BY f.name
             hint = suggestions.get(cat_lower.replace(" ", ""),
                 "For non-form analytics use batch_dependency_resolve (P2) "
                 "or routine_subgraph (P3).")
-            return json.dumps(
-                {
-                    "object_name": object_name,
-                    "category": category,
-                    "forms": [],
-                    "note": (
-                        f"Category '{category}' has no Form nodes for object "
-                        f"'{resolved.get('name', object_name)}'. "
-                        + hint
-                    ),
-                },
-                ensure_ascii=False,
-            )
+            return {
+                "object_name": object_name,
+                "category": category,
+                "forms": [],
+                "note": (
+                    f"Category '{category}' has no Form nodes for object "
+                    f"'{resolved.get('name', object_name)}'. "
+                    + hint
+                ),
+            }
 
         # Step 2: per-form aggregate controls and bindings.
         cypher_aggregate = """
@@ -673,38 +687,36 @@ RETURN f.name AS form_name, total, bound,
                 if agg:
                     out_forms.append(agg[0])
                 else:
-                    out_forms.append(
-                        {
-                            "form_name": fr["form_name"],
-                            "form_qn": fr["form_qn"],
-                            "total": 0,
-                            "bound": 0,
-                            "unbound": 0,
-                            "bound_pct": 0,
-                        }
-                    )
-            except Exception as e:
-                logger.exception("form_binding_summary aggregate failed for %s", fr["form_qn"])
-                out_forms.append(
-                    {
+                    out_forms.append({
                         "form_name": fr["form_name"],
                         "form_qn": fr["form_qn"],
-                        "error": str(e),
-                    }
-                )
+                        "total": 0,
+                        "bound": 0,
+                        "unbound": 0,
+                        "bound_pct": 0,
+                    })
+            except Exception as e:
+                logger.exception("form_binding_summary aggregate failed for %s", fr["form_qn"])
+                out_forms.append({
+                    "form_name": fr["form_name"],
+                    "form_qn": fr["form_qn"],
+                    "error": str(e),
+                })
 
-        return json.dumps(
-            {
-                "object_name": object_name,
-                "category": category,
-                "qualified_name": qn,
-                "forms": out_forms,
-            },
-            ensure_ascii=False,
-            default=str,
-        )
+        return {
+            "object_name": object_name,
+            "category": category,
+            "qualified_name": qn,
+            "forms": out_forms,
+        }
 
-    form_binding_summary.__doc__ = """Per-form bound/unbound control counts. Works for all 42 categories; categories without Form return valid empty result with note. object_name accepts 'Category.Name' for any of the 42 categories."""
+    form_binding_summary.__doc__ = (
+        "Per-form bound/unbound control counts. "
+        "Works for all 42 categories; categories without Form return valid "
+        "empty result with note. "
+        "object_name accepts 'Category.Name' for any of the 42 categories. "
+        "Returns {object_name, category, forms: [{form_name, total, bound, unbound, bound_pct}], note?}."
+    )
     mcp.tool()(form_binding_summary)
 
 

@@ -36,11 +36,11 @@ docker compose -f ../1c-mcp-metacode/docker-compose.yml -p <project>-metacode up
 **Verified on unf (2026-07-24):** all 5 tools return real data. P5 tested across 22 categories (11 with forms, 11 without) — all return valid responses. P1 write-block tested with 5 dangerous queries — all blocked.
 
 ##### v2.1.1-extended - 2026-07-25
-**Bugfixes and refinements (7 items from report §5.1):**
+**Bugfixes and refinements (8 items from report §5.1 + P3 Cypher fix):**
 
 - **P1 `cypher_query`**: LIMIT auto-append now only fires when the query has at least one `RETURN` clause — no more false appends on `WITH`-only or CALL subqueries.
 - **P2 `batch_dependency_resolve`**: auto-reduces limit to 20 when neither `attribute_name` nor `object_filter` is set (prevents 16K-row surprises). Adds contextual `note` on broad or truncated results. Returns `note` with relationship hints when 0 rows for non-FormControl pairs.
-- **P3 `routine_subgraph`**: `routine_id` is now validated as a 40-character SHA-1 hex string before interpolation — eliminates Cypher injection risk and redundant escaping.
+- **P3 `routine_subgraph`**: `routine_id` is now validated as a 40-character SHA-1 hex string before interpolation — eliminates Cypher injection risk and redundant escaping. Fixed `->` and `-` after `]` in relationship patterns that were broken during the refactor.
 - **P4 `reverse_callers`**: adds explanatory `note` when 0 rows are returned, directing users to `get_event_subscriptions` / `find_dependency_paths` for event-handler routines.
 - **P5 `form_binding_summary`**: contextual notes for categories like ОбщиеМодули, Подсистемы, Константы, РегламентныеЗадания, Роли with tool-specific suggestions.
 
