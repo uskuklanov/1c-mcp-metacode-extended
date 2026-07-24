@@ -11,7 +11,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Literal, Optional, Tuple, Union
+from typing import Any, Dict, List, Literal, Annotated, Optional, Tuple, Union
 
 from config import settings
 from graphdb.category_canon import canon_categories
@@ -1888,12 +1888,12 @@ def _shape_find_metadata_objects_result(
 
 
 def get_metadata(
-    mode: Literal["summary", "configurations", "categories", "objects"] = "summary",
-    category: Optional[str] = None,
-    object_name: Optional[str] = None,
-    object_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    config: Optional[str] = None,
-    only_adopted: bool = False,
+    mode: Annotated[Literal["summary", "configurations", "categories", "objects"], "summary/categories/configs/objects (default=summary)"] = "summary",
+    category: Annotated[Optional[str], "Category filter. E.g. 'Справочники', 'Документы'."] = None,
+    object_name: Annotated[Optional[str], "Object name: 'Category.Name' or plain name."] = None,
+    object_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
+    only_adopted: Annotated[bool, "Only extension-adopted objects."] = False,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -2080,24 +2080,24 @@ ORDER BY config_name, category
 # ---------------------------------------------------------------------------
 
 def find_metadata_objects(
-    search_by: Literal[
+    search_by: Annotated[Literal[
         "description", "attribute", "tabular_part", "tabular_attribute",
         "resource", "dimension", "form", "form_control", "form_attribute",
         "form_event", "command", "layout", "predefined_name", "journal_graph",
-    ] = "attribute",
-    search_text: Optional[str] = None,
-    search_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    categories: Optional[List[str]] = None,
-    tabular_part: Optional[str] = None,
-    tabular_part_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    within_object: Optional[str] = None,
-    within_form: Optional[str] = None,
-    form_role: Optional[Literal["object", "group", "list", "picker", "group_picker"]] = None,
-    default_form_only: Optional[bool] = None,
-    form_event_source: Optional[Literal["form", "controls", "all"]] = None,
-    min_score: Optional[float] = None,
-    include_help_text: bool = False,
-    config: Optional[str] = None,
+    ], "Search aspect: description (semantic), attribute (by name), tabular_part, form, command, layout, etc."] = "attribute",
+    search_text: Annotated[Optional[str], "Query text. Natural-language for description mode."] = None,
+    search_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    categories: Annotated[Optional[List[str]], "Categories filter (list of strings)."] = None,
+    tabular_part: Annotated[Optional[str], "Tabular section name filter."] = None,
+    tabular_part_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    within_object: Annotated[Optional[str], "Scope to specific owner."] = None,
+    within_form: Annotated[Optional[str], "Scope to specific form."] = None,
+    form_role: Annotated[Optional[Literal["object", "group", "list", "picker", "group_picker"]], "object, group, list, picker, or group_picker."] = None,
+    default_form_only: Annotated[Optional[bool], "True=default only. False=all forms."] = None,
+    form_event_source: Annotated[Optional[Literal["form", "controls", "all"]], "form, controls, or all."] = None,
+    min_score: Annotated[Optional[float], "Min relevance 0.0-1.0. Higher=fewer but more relevant."] = None,
+    include_help_text: Annotated[bool, "Include full help text. False=compact."] = False,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -2556,20 +2556,20 @@ SKIP $offset LIMIT $limit
 # ---------------------------------------------------------------------------
 
 def get_metadata_object_structure(
-    object_ref: str,
-    sections: Optional[List[Literal[
+    object_ref: Annotated[str, "Metadata object: 'Category.Name' (e.g. 'Документы.РасходнаяНакладная')."],
+    sections: Annotated[Optional[List[Literal[
         "overview", "attributes", "tabular_parts", "tabular_attributes",
         "characteristics", "resources", "dimensions", "forms", "default_forms",
         "commands", "layouts", "enum_values", "journal_graphs", "predefined",
         "url_templates", "url_methods",
-    ]]] = None,
-    element_name: Optional[str] = None,
-    element_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    tabular_part: Optional[str] = None,
-    url_template: Optional[str] = None,
-    form_role: Optional[Literal["object", "group", "list", "picker", "group_picker"]] = None,
-    default_form_only: Optional[bool] = None,
-    config: Optional[str] = None,
+    ]]], "Data sections to include. Omit=counts-only overview."] = None,
+    element_name: Annotated[Optional[str], "Filter elements by name. Use element_match for comparison."] = None,
+    element_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    tabular_part: Annotated[Optional[str], "Tabular section name filter."] = None,
+    url_template: Annotated[Optional[str], "URL template name to scope url_methods."] = None,
+    form_role: Annotated[Optional[Literal["object", "group", "list", "picker", "group_picker"]], "object, group, list, picker, or group_picker."] = None,
+    default_form_only: Annotated[Optional[bool], "True=default only. False=all forms."] = None,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -2903,18 +2903,18 @@ SKIP $offset LIMIT $limit
 # ---------------------------------------------------------------------------
 
 def find_metadata_elements(
-    element_type: Literal[
+    element_type: Annotated[Literal[
         "attribute", "attributes_of_matching_objects", "tabular_attribute",
         "form", "form_attribute", "command", "layout", "journal_graph",
-    ],
-    element_name: Optional[str] = None,
-    element_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    owner_object: Optional[str] = None,
-    owner_object_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    tabular_part: Optional[str] = None,
-    form_role: Optional[Literal["object", "group", "list", "picker", "group_picker"]] = None,
-    default_form_only: Optional[bool] = None,
-    config: Optional[str] = None,
+    ], "Child element type. Single value or array. See Literal for valid options."],
+    element_name: Annotated[Optional[str], "Filter elements by name. Use element_match for comparison."] = None,
+    element_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    owner_object: Annotated[Optional[str], "Scope to owner object (plain or 'Category.Name')."] = None,
+    owner_object_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    tabular_part: Annotated[Optional[str], "Tabular section name filter."] = None,
+    form_role: Annotated[Optional[Literal["object", "group", "list", "picker", "group_picker"]], "object, group, list, picker, or group_picker."] = None,
+    default_form_only: Annotated[Optional[bool], "True=default only. False=all forms."] = None,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -3128,13 +3128,13 @@ SKIP $offset LIMIT $limit
 # ---------------------------------------------------------------------------
 
 def find_metadata_usages(
-    mode: Literal["objects", "paths", "register_movements"],
-    target_ref: str,
-    target_category: Optional[str] = None,
-    result_category: Optional[str] = None,
-    include_tabular: Optional[bool] = None,
-    target_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    config: Optional[str] = None,
+    mode: Annotated[Literal["objects", "paths", "register_movements"], "objects,paths,register_movements"],
+    target_ref: Annotated[str, "Target object name/pattern for usages search."],
+    target_category: Annotated[Optional[str], "Category of target for type matching."] = None,
+    result_category: Annotated[Optional[str], "Only usages from this category."] = None,
+    include_tabular: Annotated[Optional[bool], "Include tabular attrs. Default=true."] = None,
+    target_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -3400,8 +3400,8 @@ _TYPE_COALESCE = "coalesce(x.`Тип`, x.`type`, x.`ValueType`, x.`ТипЗна�
 
 
 def get_metadata_element_type(
-    object_ref: str,
-    element_type: Optional[Union[
+    object_ref: Annotated[str, "Metadata object: 'Category.Name' (e.g. 'Документы.РасходнаяНакладная')."],
+    element_type: Annotated[Optional[Union[
         Literal[
             "attribute", "addressing_attribute", "tabular_attribute",
             "resource", "dimension", "accounting_flag",
@@ -3412,12 +3412,12 @@ def get_metadata_element_type(
             "resource", "dimension", "accounting_flag",
             "dimension_accounting_flag", "form_attribute",
         ]],
-    ]] = None,
-    element_name: Optional[str] = None,
-    container_ref: Optional[str] = None,
-    element_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    container_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    config: Optional[str] = None,
+    ]], "Child element type. Single value or array. See Literal for valid options."] = None,
+    element_name: Annotated[Optional[str], "Filter elements by name. Use element_match for comparison."] = None,
+    container_ref: Annotated[Optional[str], "Container name (tabular part or form)."] = None,
+    element_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    container_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -3781,12 +3781,12 @@ SKIP $offset LIMIT $limit
 # ---------------------------------------------------------------------------
 
 def find_predefined_values(
-    mode: Literal["name", "flag", "account_type", "subconto_type"],
-    owner_object: Optional[str] = None,
-    criterion: Optional[str] = None,
-    criterion_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-    flag_value: Optional[bool] = None,
-    config: Optional[str] = None,
+    mode: Annotated[Literal["name", "flag", "account_type", "subconto_type"], "name,flag,account_type,subconto_type"],
+    owner_object: Annotated[Optional[str], "Scope to owner object (plain or 'Category.Name')."] = None,
+    criterion: Annotated[Optional[str], "Search value. Item name, flag name (Валютный), account/subconto type."] = None,
+    criterion_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+    flag_value: Annotated[Optional[bool], "Boolean flag filter."] = None,
+    config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
     limit: Optional[int] = None,
     offset: Optional[int] = None,
     project_name: Optional[str] = None,
@@ -3937,12 +3937,12 @@ SKIP $offset LIMIT $limit
 
 def _register_get_access_rights(mcp):
     def get_access_rights(
-        mode: Literal["roles_for_target", "targets_of_role", "role_rights_to_target"],
-        target_ref: Optional[str] = None,
-        role_ref: Optional[str] = None,
-        role_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        config: Optional[str] = None,
-        include_conditions: Optional[bool] = False,
+        mode: Annotated[Literal["roles_for_target", "targets_of_role", "role_rights_to_target"], "roles_for_target/targets_of_role/role_rights_to_target"],
+        target_ref: Annotated[Optional[str], "Target object name/pattern for usages search."] = None,
+        role_ref: Annotated[Optional[str], "Role name to query access rights for."] = None,
+        role_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
+        include_conditions: Annotated[Optional[bool], "Include RLS conditions. Default=false."] = False,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -4108,18 +4108,18 @@ SKIP $offset LIMIT $limit
 
 def _register_get_metadata_details(mcp):
     def get_metadata_details(
-        mode: Literal["resolve", "properties"],
-        ref_type: Literal[
+        mode: Annotated[Literal["resolve", "properties"], "resolve or properties"],
+        ref_type: Annotated[Literal[
             "qualified_name", "qualified_name_prefix", "guid",
             "routine_id", "object", "form", "command",
             "attribute", "resource", "dimension", "control", "enum_value",
             "tabular_part", "tabular_attribute",
             "form_attribute", "form_command", "form_event", "form_event_action",
-        ],
-        ref: str,
-        owner_ref: Optional[str] = None,
-        config: Optional[str] = None,
-        include_help: Optional[bool] = False,
+        ], "Reference type: qualified_name, guid, routine_id, object, form, attribute, etc."],
+        ref: Annotated[str, "Reference string in ref_type format."],
+        owner_ref: Annotated[Optional[str], "Owner qualified_name/pattern. Covers owner+children."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
+        include_help: Annotated[Optional[bool], "Include help text. Default=false."] = False,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -4691,17 +4691,17 @@ SKIP $offset LIMIT $limit
 
 def _register_get_form_structure(mcp):
     def get_form_structure(
-        object_ref: str,
-        form_name: Optional[str] = None,
-        sections: Optional[List[Literal[
+        object_ref: Annotated[str, "Metadata object: 'Category.Name' (e.g. 'Документы.РасходнаяНакладная')."],
+        form_name: Annotated[Optional[str], "Form name. E.g. 'ФормаДокумента'."] = None,
+        sections: Annotated[Optional[List[Literal[
             "controls", "events", "event_handlers", "attributes",
             "commands", "command_usages", "bindings",
-        ]]] = None,
-        element_name: Optional[str] = None,
-        element_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        form_event_source: Optional[Literal["form", "controls", "all"]] = None,
-        target_type: Optional[Literal["attribute", "dimension", "resource", "form_attribute", "metadata_object"]] = None,
-        config: Optional[str] = None,
+        ]]], "Data sections to include. Omit=counts-only overview."] = None,
+        element_name: Annotated[Optional[str], "Filter elements by name. Use element_match for comparison."] = None,
+        element_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        form_event_source: Annotated[Optional[Literal["form", "controls", "all"]], "form, controls, or all."] = None,
+        target_type: Annotated[Optional[Literal["attribute", "dimension", "resource", "form_attribute", "metadata_object"]], "attribute, dimension, resource, form_attribute, or metadata_object."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -5344,13 +5344,13 @@ ORDER BY control, command SKIP $offset LIMIT $limit
 
 def _register_find_form_links(mcp):
     def find_form_links(
-        mode: Literal["controls_bound_to", "events_handled_by_routine"],
-        binding_target: Optional[str] = None,
-        target_type: Optional[Literal["attribute", "dimension", "resource", "form_attribute", "metadata_object"]] = None,
-        binding_target_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        routine_ref: Optional[str] = None,
-        routine_owner_ref: Optional[str] = None,
-        config: Optional[str] = None,
+        mode: Annotated[Literal["controls_bound_to", "events_handled_by_routine"], "controls_bound_to or events_handled_by_routine"],
+        binding_target: Annotated[Optional[str], "Attribute/resource/dimension name a control binds to."] = None,
+        target_type: Annotated[Optional[Literal["attribute", "dimension", "resource", "form_attribute", "metadata_object"]], "attribute, dimension, resource, form_attribute, or metadata_object."] = None,
+        binding_target_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        routine_ref: Annotated[Optional[str], "Routine: 40-char SHA-1, exact name, or unique fragment."] = None,
+        routine_owner_ref: Annotated[Optional[str], "Owner pattern to scope routine search."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -5478,12 +5478,12 @@ SKIP $offset LIMIT $limit
 
 def _register_get_event_subscriptions(mcp):
     def get_event_subscriptions(
-        mode: Literal["list", "of_object", "sources", "handlers"],
-        source_object: Optional[str] = None,
-        source_category: Optional[str] = None,
-        subscription_ref: Optional[str] = None,
-        subscription_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        config: Optional[str] = None,
+        mode: Annotated[Literal["list", "of_object", "sources", "handlers"], "list,of_object,sources,handlers"],
+        source_object: Annotated[Optional[str], "Object name for subscription search."] = None,
+        source_category: Annotated[Optional[str], "Category of source_object."] = None,
+        subscription_ref: Annotated[Optional[str], "Subscription name or pattern."] = None,
+        subscription_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -5633,27 +5633,27 @@ SKIP $offset LIMIT $limit
 
 def _register_search_bsl_routines(mcp):
     def search_bsl_routines(
-        mode: Literal["description", "name", "signature", "unused", "exported"],
-        search_text: Optional[str] = None,
-        search_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        owner_ref: Optional[str] = None,
-        routine_type: Optional[Literal["Procedure", "Function"]] = None,
-        export: Optional[bool] = None,
-        directive: Optional[str] = None,
-        is_ssl_api: Optional[bool] = None,
-        routine_name: Optional[str] = None,
-        owner_categories: Optional[List[str]] = None,
-        module_type: Optional[Literal[
+        mode: Annotated[Literal["description", "name", "signature", "unused", "exported"], "description/name/signature/unused/exported"],
+        search_text: Annotated[Optional[str], "Query text. Natural-language for description mode."] = None,
+        search_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        owner_ref: Annotated[Optional[str], "Owner qualified_name/pattern. Covers owner+children."] = None,
+        routine_type: Annotated[Optional[Literal["Procedure", "Function"]], "Procedure or Function filter."] = None,
+        export: Annotated[Optional[bool], "Only exported routines (Экспорт keyword)."] = None,
+        directive: Annotated[Optional[str], "Compiler directive: '&НаКлиенте', '&НаСервере', etc."] = None,
+        is_ssl_api: Annotated[Optional[bool], "Only BSP/SSL API routines."] = None,
+        routine_name: Annotated[Optional[str], "Case-insensitive substring filter on routine name."] = None,
+        owner_categories: Annotated[Optional[List[str]], "Categories filter. E.g. ['Справочники','Документы']."] = None,
+        module_type: Annotated[Optional[Literal[
             "CommonModule", "CommonFormModule", "FormModule", "CommandModule",
             "ObjectModule", "ManagerModule", "ValueManagerModule", "RecordSetModule",
             "ConfigurationModule",
-        ]] = None,
-        min_score: Optional[float] = None,
-        config: Optional[str] = None,
+        ]], "Module type: CommonModule, ObjectModule, FormModule, etc."] = None,
+        min_score: Annotated[Optional[float], "Min relevance 0.0-1.0. Higher=fewer but more relevant."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
-        call_context_mode: Literal["none", "callees", "callers", "both"] = "none",
-        call_context_limit: Optional[int] = 5,
+        call_context_mode: Annotated[Literal["none", "callees", "callers", "both"], "none, callees, callers, or both."] = "none",
+        call_context_limit: Annotated[Optional[int], "Max context items per routine (default 5)."] = 5,
         project_name: Optional[str] = None,
     ) -> str:
         """Search/list BSL routines (procedures/functions) across the project.
@@ -5958,14 +5958,14 @@ ORDER BY name, id SKIP $offset LIMIT $limit
 
 def _register_get_bsl_routine_body(mcp):
     def get_bsl_routine_body(
-        routine_ref: str,
-        routine_ref_type: Literal["id", "name", "signature"] = "name",
-        routine_owner_ref: Optional[str] = None,
-        body_limit: Optional[int] = None,
-        body_offset: Optional[int] = None,
+        routine_ref: Annotated[str, "Routine: 40-char SHA-1, exact name, or unique fragment."],
+        routine_ref_type: Annotated[Literal["id", "name", "signature"], "id (SHA-1), name (exact), or signature (substring)."] = "name",
+        routine_owner_ref: Annotated[Optional[str], "Owner pattern to scope routine search."] = None,
+        body_limit: Annotated[Optional[int], "Max chars of body to return (for large procedures)."] = None,
+        body_offset: Annotated[Optional[int], "Char offset into body (pagination)."] = None,
         limit: Optional[int] = 1,
         offset: Optional[int] = None,
-        config: Optional[str] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         project_name: Optional[str] = None,
     ) -> str:
         """Get BSL routine metadata and body text.
@@ -6565,15 +6565,15 @@ def _shape_get_bsl_modules_result(
 
 def _register_get_bsl_modules(mcp):
     def get_bsl_modules(
-        mode: Literal["modules_of_owner", "modules_by_owner_name", "module_routines", "common_module_routines"],
-        owner_ref: Optional[str] = None,
-        owner_kind: Optional[Literal["Form", "MetadataObject", "Configuration", "Command"]] = None,
-        owner_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        module_ref: Optional[str] = None,
-        module_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        routine_name: Optional[str] = None,
-        routine_name_match: Optional[Literal["exact", "starts_with", "contains"]] = None,
-        config: Optional[str] = None,
+        mode: Annotated[Literal["modules_of_owner", "modules_by_owner_name", "module_routines", "common_module_routines"], "modules_of_owner,modules_by_owner_name,module_routines,common_module_routines"],
+        owner_ref: Annotated[Optional[str], "Owner qualified_name/pattern. Covers owner+children."] = None,
+        owner_kind: Annotated[Optional[Literal["Form", "MetadataObject", "Configuration", "Command"]], "Form, MetadataObject, Configuration, or Command."] = None,
+        owner_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        module_ref: Annotated[Optional[str], "Module name or pattern."] = None,
+        module_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        routine_name: Annotated[Optional[str], "Case-insensitive substring filter on routine name."] = None,
+        routine_name_match: Annotated[Optional[Literal["exact", "starts_with", "contains"]], "exact, starts_with, or contains."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -6871,13 +6871,13 @@ def _build_subtree_graph(raw_edges: List[Dict], routine_id: str) -> Dict:
 
 def _register_get_bsl_call_graph(mcp):
     def get_bsl_call_graph(
-        mode: Literal["callees", "callers", "subtree", "between_owners"],
-        routine_id: Optional[str] = None,
-        direction: Optional[Literal["out", "in", "both"]] = None,
-        depth: Optional[int] = None,
-        from_owner_qn: Optional[str] = None,
-        to_owner_qn: Optional[str] = None,
-        config: Optional[str] = None,
+        mode: Annotated[Literal["callees", "callers", "subtree", "between_owners"], "callees,callers,subtree,between_owners"],
+        routine_id: Annotated[Optional[str], "40-char SHA-1 hex routine node ID."] = None,
+        direction: Annotated[Optional[Literal["out", "in", "both"]], "downstream, upstream, or both."] = None,
+        depth: Annotated[Optional[int], "Hop count. Higher values are slower on 298K-routine configs."] = None,
+        from_owner_qn: Annotated[Optional[str], "Source owner qn (between_owners mode)."] = None,
+        to_owner_qn: Annotated[Optional[str], "Target owner qn (between_owners mode)."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -7104,14 +7104,14 @@ ORDER BY caller, callee SKIP $offset LIMIT $limit
 
 def _register_find_dependency_paths(mcp) -> None:
     def find_dependency_paths(
-        start_ref: str,
-        direction: Literal["downstream", "upstream", "both"] = "downstream",
-        relationship_types: Optional[List[Literal[
+        start_ref: Annotated[str, "Start node: 'Category.Name' or qualified_name."],
+        direction: Annotated[Literal["downstream", "upstream", "both"], "downstream, upstream, or both."] = "downstream",
+        relationship_types: Annotated[Optional[List[Literal[
             "USED_IN", "DO_MOVEMENTS_IN", "CALLS",
             "BINDS_TO", "LINKS_TO_COMMAND", "HAS_HANDLER", "USES_HANDLER",
-        ]]] = None,
-        depth: Optional[int] = None,
-        config: Optional[str] = None,
+        ]]], "Filter by type(s): USED_IN, CALLS, BINDS_TO, etc."] = None,
+        depth: Annotated[Optional[int], "Hop count. Higher values are slower on 298K-routine configs."] = None,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         project_name: Optional[str] = None,
@@ -7215,14 +7215,14 @@ def _dependencies_to_tables(paths_list):
 
 def _register_inspect_metadata_object(mcp):
     def inspect_metadata_object(
-        object_ref: str,
-        sections: Optional[List[Literal[
+        object_ref: Annotated[str, "Metadata object: 'Category.Name' (e.g. 'Документы.РасходнаяНакладная')."],
+        sections: Annotated[Optional[List[Literal[
             "overview", "structure", "forms", "form_events", "form_attributes",
             "usages", "dependencies", "access", "subscriptions", "bsl", "predefined"
-        ]]] = None,
-        detail: Literal["brief", "standard", "extended"] = "brief",
-        limit_per_section: int = 10,
-        config: Optional[str] = None,
+        ]]], "Data sections to include. Omit=counts-only overview."] = None,
+        detail: Annotated[Literal["brief", "standard", "extended"], "brief (counts), standard (lists), extended (full details)."] = "brief",
+        limit_per_section: Annotated[int, "Max items per section in extended/standard mode."] = 10,
+        config: Annotated[Optional[str], "Scope to config or extension name. Omit for base config."] = None,
         project_name: Optional[str] = None,
     ) -> str:
         """First-step inventory tool: returns what data exists for a metadata object, optionally with limited lists per section.
@@ -8743,14 +8743,14 @@ RETURN rid, br.id AS base_id, br.name AS target, rel.decorator AS decorator_type
         return code_changes, truncated
 
     def get_extension_object_diff(
-        object_ref: str,
-        extension_ref: Optional[str] = None,
-        sections: Optional[List[Literal[
+        object_ref: Annotated[str, "Metadata object: 'Category.Name' (e.g. 'Документы.РасходнаяНакладная')."],
+        extension_ref: Annotated[Optional[str], "Extension name. Omit for all vs base."] = None,
+        sections: Annotated[Optional[List[Literal[
             "overview", "structure", "forms", "form_items", "bsl", "all"
-        ]]] = None,
-        detail: Literal["brief", "standard", "extended"] = "standard",
-        include_unchanged: bool = False,
-        limit_per_section: int = 50,
+        ]]], "Data sections to include. Omit=counts-only overview."] = None,
+        detail: Annotated[Literal["brief", "standard", "extended"], "brief (counts), standard (lists), extended (full details)."] = "standard",
+        include_unchanged: Annotated[bool, "Include unchanged adopted elements in diff."] = False,
+        limit_per_section: Annotated[int, "Max items per section in extended/standard mode."] = 50,
         project_name: Optional[str] = None,
     ) -> str:
         """Compare a metadata object between its base configuration and extension(s).
@@ -8912,7 +8912,7 @@ limit_per_section: max items per element type per change direction.
 # Entry point: register_tools(mcp, load_bsl)
 # ---------------------------------------------------------------------------
 
-def get_tool_return_schema(tool_name: str) -> str:
+def get_tool_return_schema(tool_name: Annotated[str, "MCP tool name for documented return schema."]) -> str:
     """Return the documented return schema of the specified MCP tool.
 
     This describes the SHAPE of the tool's response, not its availability:
@@ -8968,17 +8968,17 @@ def _register_search_bsl_code(mcp) -> None:
     shape.
     """
     def search_bsl_code(
-        query: str,
+        query: Annotated[str, "Natural-language code question for semantic search."],
         limit: Optional[int] = settings.bsl_code_search_default_limit,
-        config_name: Optional[str] = None,
-        owner_qn: Optional[str] = None,
-        owner_qn_prefix: Optional[str] = None,
-        owner_categories: Optional[List[str]] = None,
-        module_type: Optional[str] = None,
-        routine_type: Optional[Literal["Procedure", "Function"]] = None,
-        export: Optional[bool] = None,
-        include_fragments: bool = True,
-        excluded_fragment_ids: Optional[List[str]] = None,
+        config_name: Annotated[Optional[str], "Config or extension name scoping."] = None,
+        owner_qn: Annotated[Optional[str], "Exact owner qualified_name."] = None,
+        owner_qn_prefix: Annotated[Optional[str], "Filter by owner_qn prefix."] = None,
+        owner_categories: Annotated[Optional[List[str]], "Categories filter. E.g. ['Справочники','Документы']."] = None,
+        module_type: Annotated[Optional[str], "Module type: CommonModule, ObjectModule, FormModule, etc."] = None,
+        routine_type: Annotated[Optional[Literal["Procedure", "Function"]], "Procedure or Function filter."] = None,
+        export: Annotated[Optional[bool], "Only exported routines (Экспорт keyword)."] = None,
+        include_fragments: Annotated[bool, "Include code excerpts in results. Default=true."] = True,
+        excluded_fragment_ids: Annotated[Optional[List[str]], "Fragment IDs to skip (pagination)."] = None,
     ) -> str:
         """Semantic search by BSL routine BODY.
 

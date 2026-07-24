@@ -33,11 +33,14 @@ def _register_tools():
     from . import typed_tools
     from .tool_usage_metrics import install_tool_usage_metrics
     from .tool_visibility import initialize_tool_visibility
+    from . import extended_tools  # 1c-mcp-metacode-extended (fork: uskuklanov/1c-mcp-metacode-extended)
 
     typed_tools.register_tools(mcp, load_bsl=settings.load_bsl_signatures)
+    extended_tools.register_extended_tools(mcp)
     install_tool_usage_metrics(mcp)
     initialize_tool_visibility(mcp)
     logging.info("Typed MCP tools registered (load_bsl=%s)", settings.load_bsl_signatures)
+    logging.info("Extended MCP tools registered (5 tools: cypher_query, batch_dependency_resolve, routine_subgraph, reverse_callers, form_binding_summary)")
 
 
 def _run_startup_incremental() -> tuple:

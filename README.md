@@ -331,6 +331,25 @@ docker compose logs -f <имя-сервиса>
 | [docs/web-console.md](docs/web-console.md) | веб-консоль |
 | [docs/console-agent.md](docs/console-agent.md) | встроенный AI агент |
 | [docs/extensions.md](docs/extensions.md) | расширения 1С |
+| [docs/extended-tools.md](docs/extended-tools.md) | 5 дополнительных инструментов (fork only) |
+
+## Extended Tools (fork only)
+
+This fork extends the standard 22 MCP tools with 5 additional tools designed for
+analytical batch queries — reducing multi-call workflows to single calls.
+
+| Tool | P | What it does | When to use |
+|------|---|--------------|-------------|
+| `cypher_query` | P1 | Gated raw Cypher with write-block & auto-LIMIT | Ad-hoc graph queries, aggregations, counts |
+| `batch_dependency_resolve` | P2 | Batch graph JOIN (default: FormControl→Attribute) | Find all bindings to a field across the project |
+| `routine_subgraph` | P3 | Routine call graph with regex filters on name/owner | Trace callers/callees of a specific routine |
+| `reverse_callers` | P4 | Find who calls a routine by name, filter by owner | Find usages of a method across objects |
+| `form_binding_summary` | P5 | Per-form bound/unbound control counts (all 42 categories) | Classification form audit, coverage analysis |
+
+All 5 tools work on **all 42 metadata categories**, are **environment-parameterised**
+(no hardcoded `unf`/`erp` strings), and support **multi-project setups** via `PROJECT_NAME`.
+
+Full documentation: [docs/extended-tools.md](docs/extended-tools.md).
 
 Полный перечень переменных окружения с дефолтами и комментариями — в `.env.example`.
 
