@@ -387,7 +387,7 @@ def _register_routine_subgraph(mcp):
         try:
             if direction in ("callees", "both"):
                 cypher = """\
-MATCH path = (start:Routine {id:'""" + routine_id + """'})-[:CALLS*1..""" + str(depth_eff) + """\](end:Routine)
+MATCH path = (start:Routine {id:'""" + routine_id + """'})-[:CALLS*1..""" + str(depth_eff) + """]->(end:Routine)
 WHERE (start.owner_qn STARTS WITH $config_prefix OR $config_prefix = '')
   AND ($name_filter IS NULL OR end.name =~ $name_filter)
   AND ($owner_filter IS NULL OR end.owner_qn =~ $owner_filter)
@@ -416,7 +416,7 @@ LIMIT $limit
                     nodes.extend(r.get("ns_list") or [])
             if direction in ("callers", "both"):
                 cypher_back = """\
-MATCH path = (start:Routine {id:'""" + routine_id + """'})<-[:CALLS*1..""" + str(depth_eff) + """\](end:Routine)
+MATCH path = (start:Routine {id:'""" + routine_id + """'})<-[:CALLS*1..""" + str(depth_eff) + """]-(end:Routine)
 WHERE (start.owner_qn STARTS WITH $config_prefix OR $config_prefix = '')
   AND ($name_filter IS NULL OR end.name =~ $name_filter)
   AND ($owner_filter IS NULL OR end.owner_qn =~ $owner_filter)
