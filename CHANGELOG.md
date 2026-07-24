@@ -44,6 +44,15 @@ docker compose -f ../1c-mcp-metacode/docker-compose.yml -p <project>-metacode up
 - **P4 `reverse_callers`**: adds explanatory `note` when 0 rows are returned, directing users to `get_event_subscriptions` / `find_dependency_paths` for event-handler routines.
 - **P5 `form_binding_summary`**: contextual notes for categories like ОбщиеМодули, Подсистемы, Константы, РегламентныеЗадания, Роли with tool-specific suggestions.
 
+##### v2.2.0-extended - 2026-07-25
+**LLM-friendly tool signatures (Annotated + dict returns):**
+
+- **All 5 tools**: return `Dict[str, Any]` instead of `json.dumps(str)` — structured content arrives as native dict, no manual JSON parsing needed. The LLM sees `structuredContent` fields directly.
+- **All 5 tools**: every parameter now has `Annotated[type, "description"]` — the description is visible in `tools/list` `inputSchema`, helping the LLM understand parameter format (what regex syntax, what Category.Name looks like, etc.).
+- **P3 `direction`**: enum-like documentation in parameter description (callees/callers/both).
+- **P5 `form_binding_summary`**: rich example in parameter docs for `object_name`.
+- **Tool docstrings**: expanded with `USE WHEN` sections and concrete examples.
+
 ##### v2.0.0 - 2026-07-12
 - Инструменты поиска метаданных полностью переработаны: вместо трёх инструментов
   (`search_metadata` со свободным запросом и генерацией Cypher по шаблону или через LLM,
