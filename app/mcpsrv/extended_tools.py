@@ -170,8 +170,13 @@ def _register_cypher_query(mcp):
                 lim = max(1, min(MAX_LIMIT, int(limit)))
             except Exception:
                 lim = 100
-            if "LIMIT" not in query.upper().split("RETURN")[-1].upper():
-                query = query.rstrip(";").rstrip() + f" LIMIT {lim}"
+            # Only append LIMIT if the query has at least one RETURN clause
+            # and none of the RETURN branches already has LIMIT.
+            if "RETURN" in query.upper():
+                parts = query.upper().split("RETURN")
+                last_part = parts[-1].strip()
+                if "LIMIT" not in last_part:
+                    query = query.rstrip(";").rstrip() + f" LIMIT {lim}"
             if "$project_name" in query and "project_name" not in params:
                 params["project_name"] = project_name or _project_name()
             try:
@@ -236,6 +241,12 @@ def _register_batch_dependency_resolve(mcp):
             lim = max(1, min(MAX_LIMIT, int(limit)))
         except Exception:
             lim = 100
+        
+        # Auto-reduce limit for broad queries (no object_filter) to prevent
+        # overwhelming the response with thousands of rows.
+        broad_query = (not attribute_name and not object_filter)
+        if broad_query and lim > 20:
+            lim = 20
         try:
             depth_eff = max(1, min(3, int(depth)))
         except Exception:
@@ -279,6 +290,32 @@ LIMIT $limit
                 "depth": depth_eff,
                 "rows": rows,
             }
+            # Add user guidance for broad or truncated results
+            notes = []
+            if broad_query:
+                notes.append(
+                    "Broad query (no attribute_name, no object_filter). "
+                    "Pass attribute_name= or object_filter= to narrow results."
+                )
+            if out["truncated"]:
+                notes.append(
+                    f"Result truncated at {lim} rows. "
+                    "Add object_filter= to drill into a specific object or category."
+                )
+            if notes:
+                out["note"] = " | ".join(notes)
+            # When 0 rows and both sides are non-FormControl, hint about available edge types.
+            if len(rows) == 0 and from_side != "FormControl":
+                zero_note = (
+                    "Zero rows. The relationship '"
+                    + relationship + "' may not exist between " + from_side
+                    + " and " + to_side + " in this graph. "
+                    "Try relationship='USED_IN', 'CALLS', or 'DO_MOVEMENTS_IN'."
+                )
+                if "note" in out:
+                    out["note"] += " | " + zero_note
+                else:
+                    out["note"] = zero_note
             return json.dumps(out, ensure_ascii=False, default=str)
         except Exception as e:
             logger.exception("batch_dependency_resolve failed")
@@ -332,6 +369,16 @@ def _register_routine_subgraph(mcp):
                 ensure_ascii=False,
             )
 
+        # Validate routine_id: Neo4j requires literal interpolation here because
+        # parameter maps in MATCH path patterns are not supported. We whitelist
+        # SHA-1 hex IDs (40 characters) to prevent Cypher injection.
+        _SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.I)
+        if not _SHA_RE.match(routine_id):
+            return json.dumps(
+                {"error": f"routine_id must be a 40-character SHA-1 hex string, got '{routine_id[:20]}...'"},
+                ensure_ascii=False,
+            )
+
         # direction = forward (callees) or backward (callers). For both we
         # run two queries and merge; Cypher's variadic path patterns don't
         # trivially support both without union, so keep it explicit.
@@ -339,10 +386,8 @@ def _register_routine_subgraph(mcp):
         nodes = []
         try:
             if direction in ("callees", "both"):
-                # Use literal interpolation for routine_id (Neo4j does not allow parameter maps in MATCH).
-                rid_lit = routine_id.replace("'", "\\'")
-                cypher = """
-MATCH path = (start:Routine {id:'""" + rid_lit + """'})-[:CALLS*1..""" + str(depth_eff) + """]->(end:Routine)
+                cypher = """\
+MATCH path = (start:Routine {id:'""" + routine_id + """'})-[:CALLS*1..""" + str(depth_eff) + """\](end:Routine)
 WHERE (start.owner_qn STARTS WITH $config_prefix OR $config_prefix = '')
   AND ($name_filter IS NULL OR end.name =~ $name_filter)
   AND ($owner_filter IS NULL OR end.owner_qn =~ $owner_filter)
@@ -370,9 +415,8 @@ LIMIT $limit
                     edges.extend(r.get("rs_list") or [])
                     nodes.extend(r.get("ns_list") or [])
             if direction in ("callers", "both"):
-                rid_lit = routine_id.replace("'", "\\'")
-                cypher_back = """
-MATCH path = (start:Routine {id:'""" + rid_lit + """'})<-[:CALLS*1..""" + str(depth_eff) + """]-(end:Routine)
+                cypher_back = """\
+MATCH path = (start:Routine {id:'""" + routine_id + """'})<-[:CALLS*1..""" + str(depth_eff) + """\](end:Routine)
 WHERE (start.owner_qn STARTS WITH $config_prefix OR $config_prefix = '')
   AND ($name_filter IS NULL OR end.name =~ $name_filter)
   AND ($owner_filter IS NULL OR end.owner_qn =~ $owner_filter)
@@ -496,6 +540,15 @@ LIMIT $limit
                 "routine_name": routine_name,
                 "rows": rows,
             }
+            # Hint when zero rows: event-handler routines are wired through
+            # subscriptions, not CALLS edges, so they naturally return 0.
+            if len(rows) == 0:
+                out["note"] = (
+                    "Zero rows returned. Event-handler routines (ОбработкаПроведения, "
+                    "ПередЗаписью, etc.) are wired through event subscriptions, not CALLS "
+                    "edges — this is expected. Use get_event_subscriptions or "
+                    "find_dependency_paths to trace their callers."
+                )
             return json.dumps(out, ensure_ascii=False, default=str)
         except Exception as e:
             logger.exception("reverse_callers failed")
@@ -570,6 +623,18 @@ ORDER BY f.name
             return json.dumps({"error": str(e)}, ensure_ascii=False)
 
         if not forms:
+            # Contextual suggestions based on category
+            cat_lower = category.lower()
+            suggestions = {
+                "общиемодули": "Use get_bsl_modules / search_bsl_routines to inspect routines.",
+                "подсистемы": "Use get_metadata_object_structure to inspect subsystem contents.",
+                "константы": "Use batch_dependency_resolve (P2) to find attribute usages.",
+                "регламентныезадания": "Use get_event_subscriptions to find handled events.",
+                "роли": "Use get_access_rights to inspect role permissions.",
+            }
+            hint = suggestions.get(cat_lower.replace(" ", ""),
+                "For non-form analytics use batch_dependency_resolve (P2) "
+                "or routine_subgraph (P3).")
             return json.dumps(
                 {
                     "object_name": object_name,
@@ -578,8 +643,7 @@ ORDER BY f.name
                     "note": (
                         f"Category '{category}' has no Form nodes for object "
                         f"'{resolved.get('name', object_name)}'. "
-                        "For non-form analytics use batch_dependency_resolve (P2) "
-                        "or routine_subgraph (P3)."
+                        + hint
                     ),
                 },
                 ensure_ascii=False,
