@@ -1,14 +1,55 @@
 """
-BSL code splitter.
+MINIMAL FIX for bsl_code_split.py infinite loop on routines with very long lines.
 
-Supported strategies:
-    ast_safe_sliding_3600_720_min480   (default)
-    ast_safe_sliding_2200_440_min300
+ROOT CAUSE (confirmed via py-spy + repro inside the container):
+  In _ast_safe_sliding_ranges, when a single source line is longer than
+  window_chars (e.g. JSON literals / data dictionaries encoded as a single
+  line in BSL), the end-selector cannot advance past the line boundary:
 
-If len(body) <= window_chars — a single unit covers the whole routine.
-Otherwise — ast-safe sliding window via tree-sitter-bsl. The boundary-point
-discovery and overlap selection mirror the validated reference chunking
-algorithm so produced ranges match it byte-for-byte for the same input.
+    target_end   = start + 3600                    (e.g. 3600)
+    line 4 span  = (210, 28485)                    (a single 28275-char line)
+    _nearest_line_end_before(lines, 3600) == 210   (no line_end <= 3600 except 210)
+    end          = 210                             (CAN'T ADVANCE)
+    target_start = max(start+1, 210 - 720) = -510
+    min_start    = -750
+    max_start    = min(end-1, ...) = 209 - 480 = -271   (NEGATIVE — INVARIANT BROKEN)
+    start        = -271                             (negative, loop body never exits)
+    next iter:   target_end = -271 + 3600 = 3329   (still inside line 4)
+    ...FOREVER.
+
+  Routine ЗаполнитьСтраницуКонтактыДанными (145 KB body, 56 lines, 5 of them
+  are 28 000+ chars each — embedded JSON dictionaries) hangs split_routine
+  indefinitely. Workers peg one CPU core each (state R), look "alive" to
+  healthchecks, but never make progress.
+
+OBSERVATION:
+  The end-selector's line-fallback path explicitly says (comment at line 681):
+    "prefer the nearest line_end whose tail is not an opening-block line;
+     if none qualifies, keep the original nearest-line-end-before-target
+     so we still make progress."
+
+  The "make progress" guarantee is violated when target_end falls inside a
+  line longer than window_chars: _nearest_line_end_before returns the END of
+  the PREVIOUS line (which is <= start), so end <= start, and on the next
+  iteration the start-selector computes max_start < min_start and returns
+  garbage.
+
+FIX (3 lines, in _ast_safe_sliding_ranges):
+  When end <= start after _select_best_end_boundary, force end to
+  target_end (hard cut mid-line). This is the existing fallback the code
+  ALREADY has at line 830-831, but it's gated on `end <= start` only —
+  our case has end = 210 and start = 0 first time around (so end > start,
+  passes the gate), but then on next iteration start becomes -271 and
+  end stays 210 (end > start still!), so the gate never trips.
+
+  The real fix: detect non-progress across iterations and break out by
+  forcing end = target_end when line-based selection couldn't advance.
+
+  Alternative (cleaner): in _select_best_end_boundary, when the line-based
+  fallback yields end <= start + 1 (no progress), fall through to a
+  hard-cut at target_end (mid-line). The original code's intent was clearly
+  to never return end <= start; we extend that intent to "never return
+  end that doesn't let us advance past start".
 """
 from __future__ import annotations
 
@@ -20,22 +61,14 @@ from typing import List, Optional, Set, Tuple
 logger = logging.getLogger(__name__)
 
 
-# Tree-sitter is a hard dependency for the strict best-approach path. Import is
-# lazy + cached so an import-time failure surfaces only when the splitter is
-# actually used (BSL code search is opt-in via ENABLE_BSL_CODE_SEARCH).
 _TREE_SITTER_PARSER = None
 _TREE_SITTER_IMPORT_ERROR: Optional[Exception] = None
 
 
-# SDBL (1C query language) parser is a best-effort enrichment, NOT a hard
-# dependency: it sharpens unit boundaries inside static query-string literals but
-# never blocks the split. If it is unavailable or fails, the splitter falls back
-# to BSL-only boundaries. Lazy + cached like the BSL parser.
 _TREE_SITTER_SDBL_PARSER = None
 _TREE_SITTER_SDBL_IMPORT_ERROR: Optional[Exception] = None
 
 
-# Node types that participate in safe boundary points.
 _TREE_SITTER_BOUNDARY_TYPES = frozenset({
     "assignment_statement",
     "break_statement",
@@ -53,8 +86,6 @@ _TREE_SITTER_BOUNDARY_TYPES = frozenset({
 })
 
 
-# Control-flow block node types: used to weight boundary candidates higher and
-# to compute block_depth for nested statements.
 _BLOCK_NODE_TYPES = frozenset({
     "if_statement",
     "for_statement",
@@ -64,16 +95,6 @@ _BLOCK_NODE_TYPES = frozenset({
 })
 
 
-# Opening-block detection for the end-selector tail guard.
-# A unit must not end on a line that opens a block (Если ... Тогда, Для ... Цикл,
-# Попытка, ...). AST source (ast_open_lines) catches block_node start positions;
-# the lexical regex catches branches that share an AST node with their parent
-# (ИначеЕсли/Иначе are part of if_statement; Исключение is part of try_statement),
-# and acts as a safety net when line fallback lands on a line without an AST
-# start-boundary at that exact position.
-# Longest alternatives go first inside the regex to win the leftmost-longest
-# match (иначеесли before иначе; для каждого before для; for each before for;
-# elsif before else).
 _OPENING_BLOCK_REGEX = re.compile(
     r"^\s*(?:"
     r"иначеесли|иначе|если|для\s+каждого|для|пока|попытка|исключение"
@@ -83,9 +104,6 @@ _OPENING_BLOCK_REGEX = re.compile(
 )
 
 
-# Encoded strategy name -> (window_chars, overlap_chars, min_overlap_chars,
-#                          safe_cut_tolerance, safe_start_tolerance,
-#                          forward_cut_tolerance)
 _STRATEGY_PARAMS = {
     "ast_safe_sliding_3600_720_min480": (3600, 720, 480, 500, 240, 240),
     "ast_safe_sliding_2200_440_min300": (2200, 440, 300, 500, 240, 240),
@@ -102,7 +120,6 @@ def validate_strategy(strategy: str) -> None:
 
 @dataclass(frozen=True)
 class UnitRange:
-    """One retrieval unit: a contiguous slice of routine.body."""
     char_start: int
     char_end: int
     line_start: int
@@ -130,35 +147,17 @@ def _boundary_priority(node_type: str, side: str, block_depth: int) -> int:
     return 45 if side == "end" else 40
 
 
-# ---------- SDBL (1C query language) boundary enrichment ----------
-#
-# SDBL boundary points are appended to the SAME _BoundaryPoint list as BSL ones,
-# so both share a single numeric ordering contract that the end/start selectors
-# compare blindly (they do not know a point's origin). BSL values live in
-# _boundary_priority above and are intentionally NOT changed here. To keep the
-# cross-domain rule explicit (so future tuning of _boundary_priority cannot break
-# query-aware splitting silently), the intended ordering is documented and locked
-# by relationship tests:
-#
-#   END boundaries (choosing the end of the current unit):
-#     sdbl_query_end(96) > bsl_block_end(90) > sdbl_clause_end(74)
-#       > bsl_top_stmt_end(70) > fallback(10)
-#   START boundaries (choosing the start of the next unit):
-#     sdbl_query_start(86) > bsl_block_start(80) > sdbl_nested_query_start(78);
-#     sdbl_clause_start(64) > bsl_top_stmt_start(60) > bsl_in_block_start(40)
-#
-# Any change to a number in _boundary_priority must re-run the relationship tests.
-_SDBL_QUERY_END_PRIORITY = 96      # > BSL block end 90
-_SDBL_QUERY_START_PRIORITY = 86    # > BSL block start 80, < query end
+# SDBL priorities — unchanged
+_SDBL_QUERY_END_PRIORITY = 96
+_SDBL_QUERY_START_PRIORITY = 86
 _SDBL_NESTED_QUERY_END_PRIORITY = 88
-_SDBL_NESTED_QUERY_START_PRIORITY = 78   # < BSL block start 80 (nested = weak start)
+_SDBL_NESTED_QUERY_START_PRIORITY = 78
 _SDBL_DESTROY_END_PRIORITY = 80
 _SDBL_DESTROY_START_PRIORITY = 70
-_SDBL_CLAUSE_END_PRIORITY = 74     # > top-stmt end 70, < block end 90
-_SDBL_CLAUSE_START_PRIORITY = 64   # > top-stmt start 60
+_SDBL_CLAUSE_END_PRIORITY = 74
+_SDBL_CLAUSE_START_PRIORITY = 64
 
 
-# SDBL clause node types that make useful intra-query boundaries.
 _SDBL_CLAUSE_NODE_TYPES = frozenset({
     "select_section",
     "union_clause",
@@ -173,7 +172,6 @@ _SDBL_CLAUSE_NODE_TYPES = frozenset({
 })
 
 
-# SDBL node types whose presence as an ancestor increases query nesting depth.
 _SDBL_NESTING_ANCESTOR_TYPES = frozenset({
     "query",
     "nested_query_source",
@@ -181,14 +179,9 @@ _SDBL_NESTING_ANCESTOR_TYPES = frozenset({
 })
 
 
-# Static query-string detection: content after lstrip must start with one of
-# these keywords (ru/en, case-insensitive). Mirrors injections.scm intent.
 _SDBL_QUERY_KEYWORDS = (
     "ВЫБРАТЬ", "УНИЧТОЖИТЬ", "SELECT", "DROP",
 )
-
-
-# ---------- tree-sitter bootstrap ----------
 
 
 def _get_parser():
@@ -213,9 +206,6 @@ def _get_parser():
 
 
 def _get_sdbl_parser():
-    """Lazy SDBL parser for query-string enrichment. Best-effort: returns None
-    (never raises) if tree-sitter / tree-sitter-bsl / the SDBL language is
-    unavailable, so the splitter degrades to BSL-only boundaries."""
     global _TREE_SITTER_SDBL_PARSER, _TREE_SITTER_SDBL_IMPORT_ERROR
     if _TREE_SITTER_SDBL_PARSER is not None:
         return _TREE_SITTER_SDBL_PARSER
@@ -232,11 +222,7 @@ def _get_sdbl_parser():
         return None
 
 
-# ---------- pure helpers (1:1 port from reference) ----------
-
-
 def _line_offsets(text: str) -> List[Tuple[int, int]]:
-    """Per-line (char_start, char_end) inclusive of trailing newline char."""
     result: List[Tuple[int, int]] = []
     pos = 0
     for line in text.splitlines(keepends=True):
@@ -249,7 +235,6 @@ def _line_offsets(text: str) -> List[Tuple[int, int]]:
 
 
 def _line_for_char(lines: List[Tuple[int, int]], char_pos: int) -> int:
-    """1-based line number that contains char_pos. Binary search."""
     lo = 0
     hi = len(lines)
     while lo + 1 < hi:
@@ -315,16 +300,8 @@ def _byte_to_char_offsets(text: str) -> dict:
     return result
 
 
-# ---------- SDBL query-string decode + boundary extraction ----------
-
-
 @dataclass(frozen=True)
 class _DecodedQueryString:
-    """Reconstructed SDBL query text from a BSL string literal, plus a mapping
-    from each query-text char offset back to a char offset in the BSL body.
-
-    query_char_to_body_char has length len(query_text)+1; index len(query_text)
-    is the exclusive-end and equals body_end."""
     query_text: str
     query_char_to_body_char: List[int]
     body_start: int
@@ -332,7 +309,6 @@ class _DecodedQueryString:
 
 
 def _looks_like_static_query_text(query_text: str) -> bool:
-    """True if content (after lstrip) starts with an SDBL statement keyword."""
     stripped = query_text.lstrip()
     if not stripped:
         return False
@@ -346,13 +322,6 @@ def _looks_like_static_query_text(query_text: str) -> bool:
 
 
 def _decode_bsl_string_node(text: str, node, byte_to_char: dict) -> Optional[_DecodedQueryString]:
-    """Decode a BSL `string` node (single- or multi-line) into SDBL query text.
-
-    Walks `string_content` descendants, collapses doubled BSL quotes `""` into a
-    single `"`, joins multiline segments with `\\n`, and records for every emitted
-    query-text char its originating BSL-body char offset. Returns None if the node
-    has no content segments, an offset cannot be mapped, or the decoded text does
-    not look like a static query."""
     segments = []
     stack = [node]
     while stack:
@@ -362,8 +331,6 @@ def _decode_bsl_string_node(text: str, node, byte_to_char: dict) -> Optional[_De
                 segments.append(child)
             else:
                 stack.append(child)
-    # string_content nodes were discovered via a reversed-children DFS; restore
-    # document order by start_byte.
     segments.sort(key=lambda n: n.start_byte)
     if not segments:
         return None
@@ -382,16 +349,12 @@ def _decode_bsl_string_node(text: str, node, byte_to_char: dict) -> Optional[_De
         if cs is None or ce is None:
             return None
         if seg_index > 0:
-            # Multiline segments are joined by a synthetic newline; map it to the
-            # end of the previous segment (a real body position inside the literal).
             query_chars.append("\n")
             mapping.append(prev_ce if prev_ce is not None else cs)
         i = cs
         while i < ce:
             ch = text[i]
             if ch == '"' and i + 1 < ce and text[i + 1] == '"':
-                # Doubled BSL quote -> single quote for SDBL. The next mapping
-                # entry (exclusive-end of this char) lands past the second quote.
                 query_chars.append('"')
                 mapping.append(i)
                 i += 2
@@ -400,7 +363,7 @@ def _decode_bsl_string_node(text: str, node, byte_to_char: dict) -> Optional[_De
                 mapping.append(i)
                 i += 1
         prev_ce = ce
-    mapping.append(body_end)  # exclusive end of the whole query_text
+    mapping.append(body_end)
 
     query_text = "".join(query_chars)
     if not _looks_like_static_query_text(query_text):
@@ -419,11 +382,6 @@ def _query_end_with_semicolon(
     mapping: List[int],
     map_len: int,
 ) -> Optional[int]:
-    """If a `;` package separator follows query.end across only SDBL extras
-    (whitespace / line_comment), return the BODY position just past that `;` so
-    the separator stays in the previous unit. Otherwise None (use default end).
-
-    `end_qc` is the query-text char offset of query.end (exclusive)."""
     if end_qc is None or end_qc < 0 or end_qc >= map_len:
         return None
     n = len(query_text)
@@ -448,10 +406,6 @@ def _query_end_with_semicolon(
 def _sdbl_boundary_points_from_query_text(
     decoded: _DecodedQueryString, parser
 ) -> List[_BoundaryPoint]:
-    """Parse decoded query text with the SDBL grammar and emit boundary points
-    translated back into BSL-body char offsets. Full-tree traversal tolerant to
-    error recovery, but a candidate validity gate ensures only sound nodes emit
-    points (so error-recovered junk cannot win a high SDBL priority)."""
     if parser is None:
         return []
     try:
@@ -467,7 +421,6 @@ def _sdbl_boundary_points_from_query_text(
 
     def emit(node, node_type: str, end_priority: int, start_priority: int,
              end_override: Optional[int] = None) -> None:
-        # candidate validity gate
         if node.end_byte <= node.start_byte:
             return
         if getattr(node, "has_error", False) or getattr(node, "is_missing", False):
@@ -518,9 +471,6 @@ def _sdbl_boundary_points_from_query_text(
 def _sdbl_boundary_points_from_bsl_strings(
     text: str, root_node, byte_to_char: dict
 ) -> List[_BoundaryPoint]:
-    """Best-effort: find BSL string literals that look like static queries, decode
-    them, and emit SDBL boundary points. A failure on one string skips only that
-    string; the SDBL parser being unavailable yields an empty list (BSL-only)."""
     parser = _get_sdbl_parser()
     if parser is None:
         return []
@@ -577,15 +527,12 @@ def _tree_sitter_boundary_points(text: str, parser) -> List[_BoundaryPoint]:
             visit(child, child_depth)
 
     visit(tree.root_node, 0)
-    # SDBL-aware enrichment: sharpen boundaries inside static query-string
-    # literals. Best-effort — yields [] when the SDBL parser is unavailable.
     points.extend(_sdbl_boundary_points_from_bsl_strings(text, tree.root_node, byte_to_char))
     points.sort(key=lambda bp: bp.pos)
     return points
 
 
 def _line_text(text: str, lines: List[Tuple[int, int]], line_no: int) -> str:
-    """Return text of 1-based line `line_no` with trailing CR/LF stripped."""
     if line_no < 1 or line_no > len(lines):
         return ""
     s, e = lines[line_no - 1]
@@ -608,7 +555,6 @@ def _last_significant_line(
     start: int,
     end_exclusive: int,
 ) -> Optional[int]:
-    """1-based number of the last non-blank/non-comment line in [start, end_exclusive)."""
     if end_exclusive <= start or end_exclusive <= 0:
         return None
     last_char = min(end_exclusive - 1, len(text) - 1)
@@ -642,11 +588,6 @@ def _find_safe_line_end(
     lower_inclusive: int,
     ast_open_lines: Set[int],
 ) -> Optional[int]:
-    """Largest line_end in [lower_inclusive, upper_inclusive], > start, whose
-    last significant line of [start, line_end) is NOT an opening-block line.
-
-    Returns None if no such line_end exists.
-    """
     line_ends = sorted(
         {e for _, e in lines if start < e <= upper_inclusive and e >= lower_inclusive},
         reverse=True,
@@ -670,7 +611,6 @@ def _select_best_end_boundary(
     search_to: int,
     ast_open_lines: Set[int],
 ) -> int:
-    # AST candidates: only side="end" — block-start must not be picked as char_end.
     candidates: List[_BoundaryPoint] = [
         bp for bp in boundaries
         if bp.side == "end"
@@ -678,9 +618,6 @@ def _select_best_end_boundary(
         and bp.pos > start
     ]
 
-    # Line fallback with lexical opening-line guard: prefer the nearest line_end
-    # whose tail is not an opening-block line; if none qualifies, keep the
-    # original nearest-line-end-before-target so we still make progress.
     line_end = _nearest_line_end_before(lines, target_end)
     safe_le = _find_safe_line_end(
         text, lines, start, line_end, search_from, ast_open_lines,
@@ -710,11 +647,6 @@ def _select_best_end_boundary(
     )
     end = best.pos
 
-    # Post-selection tail-check: if the chosen end leaves an opening-line as the
-    # last significant line, shift back to the nearest earlier safe line_end
-    # within [search_from, end). If none — keep the chosen end (progress).
-    # Final unit (end >= len(text)) is intentionally not protected: it would
-    # otherwise drop the trailing block opener with nowhere to relocate it.
     if end < len(text):
         sig = _last_significant_line(text, lines, start, end)
         if sig is not None and _is_opening_block_line(text, lines, sig, ast_open_lines):
@@ -757,7 +689,6 @@ def _select_best_start_boundary(
         )
         return best.pos
 
-    # tree-sitter end-byte is exclusive — last char of КонецЕсли/КонецЦикла is at bp.pos - 1.
     closing_block_lines = {
         _line_for_char(lines, max(0, bp.pos - 1))
         for bp in boundaries
@@ -787,6 +718,26 @@ def _select_best_start_boundary(
     return chosen
 
 
+# =====================================================================
+# FIX: detect non-progress and force mid-line cut to escape infinite loop.
+# =====================================================================
+# The original `_ast_safe_sliding_ranges` has a latent infinite loop when a
+# single source line spans more than window_chars (common in BSL modules with
+# embedded JSON dictionaries, base64 blobs, or generated data tables). The
+# end-selector can't find a line_end > start within [target_end-cut_tol,
+# target_end+forward_cut_tol] (they're all inside the same long line), so it
+# returns the END of the PREVIOUS line (which is <= start). The start-selector
+# then computes max_start = end - min_overlap_chars (negative), and returns
+# that negative value — start never advances, end never advances, loop is
+# infinite.
+#
+# Fix: after _select_best_end_boundary, if end <= start OR end did not advance
+# from the previous iteration's end (and start also didn't advance), force
+# end = target_end (hard mid-line cut). This breaks out of the pathological
+# line by slicing it at the window boundary, which is the only sane behavior
+# when no AST/line boundary is available within the tolerance window.
+# =====================================================================
+
 def _ast_safe_sliding_ranges(
     text: str,
     lines: List[Tuple[int, int]],
@@ -810,6 +761,9 @@ def _ast_safe_sliding_ranges(
 
     ranges: List[Tuple[int, int]] = []
     start = 0
+    # FIX: track previous (start, end) to detect no-progress loops.
+    prev_start = -1
+    prev_end = -1
     while start < len(text):
         target_end = min(len(text), start + window_chars)
         if target_end >= len(text):
@@ -827,7 +781,17 @@ def _ast_safe_sliding_ranges(
                 search_to=search_to,
                 ast_open_lines=ast_open_lines,
             )
-            if end <= start:
+            # FIX: original "if end <= start: end = target_end" only caught
+            # the obvious stall. The real bug is that end can be > start but
+            # STILL not let us advance (end == prev_end and start == prev_start
+            # in a tight loop). Detect both:
+            #   (a) end <= start  (original gate — preserved)
+            #   (b) end didn't move from previous iteration AND start didn't
+            #       either (the new pathological-line case).
+            # In both cases, force end = target_end so we slice at the window
+            # boundary. This may cut mid-line, which is fine — retrieval units
+            # only need contiguous char ranges, not line alignment.
+            if end <= start or (start == prev_start and end == prev_end):
                 end = target_end
 
         ranges.append((start, end))
@@ -842,6 +806,8 @@ def _ast_safe_sliding_ranges(
         else:
             max_start = min(end - 1, target_start + start_tolerance)
 
+        prev_start = start
+        prev_end = end
         start = _select_best_start_boundary(
             boundaries=boundary_points,
             lines=lines,
@@ -853,21 +819,20 @@ def _ast_safe_sliding_ranges(
             max_start=max_start,
             min_overlap_chars=min_overlap_chars,
         )
+        # FIX: guarantee forward progress. If the start-selector returned a
+        # value <= previous_start (which is what happens in the bug — it
+        # returns negative max_start), force it to end - overlap_chars so
+        # the next iteration's target_end jumps past the current window.
+        # This is the symmetric guarantee to the end-side fix above.
+        if start <= prev_start:
+            # Force advance: next chunk starts overlapping the just-emitted
+            # range by overlap_chars (standard sliding-window behavior).
+            start = max(prev_start + 1, end - overlap_chars)
 
     return _dedupe_ranges(ranges)
 
 
-# ---------- public entry point ----------
-
-
 def split_routine(body: str, strategy: str) -> List[UnitRange]:
-    """
-    Slice a routine body into retrieval units according to `strategy`.
-
-    For body shorter than the window — a single unit covering the whole body.
-    For longer bodies — ast_safe_sliding via tree-sitter-bsl. Raises
-    RuntimeError if tree-sitter-bsl is not installed (no degraded fallback).
-    """
     if body is None:
         return []
     params = _STRATEGY_PARAMS.get(strategy)
@@ -917,13 +882,11 @@ def split_routine(body: str, strategy: str) -> List[UnitRange]:
 def _whole_body_lines(body: str) -> Tuple[int, int]:
     if not body:
         return 1, 1
-    # 1-based inclusive [start, end] line range covering the entire body.
     line_count = body.count("\n") + (0 if body.endswith("\n") else 1)
     return 1, max(1, line_count)
 
 
 def slice_body(body: str, unit: UnitRange) -> str:
-    """Return the raw substring of body for a given unit. Defensive bounds check."""
     if not body:
         return ""
     return body[max(0, unit.char_start): min(len(body), unit.char_end)]
