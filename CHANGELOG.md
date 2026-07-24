@@ -1,5 +1,40 @@
 # Changelog
 
+##### v2.1.0-extended - 2026-07-24
+**Fork of [ROCTUP/1c-mcp-metacode](https://github.com/ROCTUP/1c-mcp-metacode) maintained by [uskuklanov](https://github.com/uskuklanov).**
+
+5 new MCP tools added in `app/mcpsrv/extended_tools.py`:
+
+- **`cypher_query(query, params?, limit?, timeout_sec?, project_name?)`** — gated raw Cypher execution against Neo4j HTTP API. Write operations (CREATE/MERGE/DELETE/SET/REMOVE/DROP/apoc.write) are blocked by regex filter. Auto-appends LIMIT if missing. Pass `$project_name` and the tool fills it in from the current PROJECT_NAME env var. Returns `{columns, rows, row_count, truncated, execution_ms}`. Works across all 42 metadata categories and any 1C project.
+
+- **`batch_dependency_resolve(attribute_name?, object_filter?, routine_filter?, relationship?, from_side?, to_side?, depth?, limit?, project_name?)`** — high-level graph JOIN with regex filters. Default is `FormControl -[BINDS_TO]-> Attribute` (works for any category that has attributes, all 42). Variadic path `*1..depth` (depth=1..3). For categories without FormControl (Константы, РегламентныеЗадания) use `from_side='Attribute'`. Returns `{count, truncated, relationship, from_side, to_side, depth, rows: [{from_name, from_qn, to_name, to_qn, via_relationship}]}`.
+
+- **`routine_subgraph(routine_id, callee_name_filter?, callee_owner_filter?, direction?, depth?, limit?, project_name?)`** — routine call subgraph with regex filters on callee/caller name and owner_qn. direction=callees|callers|both, depth=1..3. routine_id is 40-char SHA. Returns `{count_nodes, count_edges, direction, depth, nodes, edges}`.
+
+- **`reverse_callers(routine_name, routine_owner_filter?, caller_owner_filter?, limit?, project_name?)`** — find callers of a routine by name, with owner_qn regex filters. Returns 0 rows for event-handler routines like `ОбработкаПроведения` (they are wired through event subscriptions, not CALLS) — by design.
+
+- **`form_binding_summary(object_name, form_name?, project_name?)`** — per-form aggregate: total controls, bound, unbound, bound %. Works for any of the 42 metadata categories via `'<Категория>.<Имя>'`. Categories without Form return a valid empty result with an explanatory note (NOT an error). Uses `[:HAS_CONTROL|HAS_CHILD*0..]` to walk the entire control tree. Returns `{object_name, category, qualified_name, forms: [{form_name, total, bound, unbound, bound_pct}], note?}`.
+
+**Multi-project portability (env-driven, no code changes):**
+- `PROJECT_NAME` (env) — required, used as prefix in Cypher filters via `$config_prefix`.
+- `NEO4J_HTTP_URL` (env, optional) — defaults to derivation from `NEO4J_URI` (e.g. `bolt://neo4j:7687` → `http://neo4j:7474`).
+- `NEO4J_PASSWORD` (env or `.env`) — for P1 basic auth.
+- `CONFIG_NAME` (env, optional) — defaults to `УправлениеНебольшойФирмой` (matches УНФ; override for other projects).
+
+**Other changes:**
+- `app/mcpsrv/server.py`: 3-line patch in `_register_tools()` to import and call `extended_tools.register_extended_tools(mcp)`.
+- `app/graphdb/bsl_code_split.py`: bake the Phase A infinite-loop fix into the image (was a volume-overlay fix in unf-metacode's docker-compose.yml).
+
+**Build / deploy:**
+```bash
+# In your 1C project (e.g. unf):
+cd tools/1c-mcp-metacode-fork
+docker compose -f ../1c-mcp-metacode/docker-compose.yml -p <project>-metacode build metacode
+docker compose -f ../1c-mcp-metacode/docker-compose.yml -p <project>-metacode up -d metacode
+```
+
+**Verified on unf (2026-07-24):** all 5 tools return real data. P5 tested across 22 categories (11 with forms, 11 without) — all return valid responses. P1 write-block tested with 5 dangerous queries — all blocked.
+
 ##### v2.0.0 - 2026-07-12
 - Инструменты поиска метаданных полностью переработаны: вместо трёх инструментов
   (`search_metadata` со свободным запросом и генерацией Cypher по шаблону или через LLM,
