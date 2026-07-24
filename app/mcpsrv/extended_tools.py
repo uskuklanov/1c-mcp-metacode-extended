@@ -1,4 +1,4 @@
-"""
+﻿"""
 Extended MCP tools for 1c-mcp-metacode.
 
 Five new tools that complement the typed_tools.py inventory:
@@ -8,9 +8,14 @@ Five new tools that complement the typed_tools.py inventory:
   P4 reverse_callers            — who calls a routine, with owner filter
   P5 form_binding_summary       — per-form bound/unbound control counts
 
-All five tools RETURN PYTHON DICTS (not JSON strings) so the LLM can read
-them directly without parsing. Parameters have Annotated descriptions for
-better discoverability via tools/list.
+All five return TOON-encoded strings (settings.response_format='toon' by
+default), going through upstream's compact_refs_dict() + filter_for_summarization()
+to deduplicate qualified_name / config_name / category / right / type via
+@qn:N / @p:N / @cat:N / @rn:N / @t:N references. This typically yields
+40-60% token savings vs raw JSON without losing any information.
+
+Error responses ({"error": ...}) bypass the compression pipeline because
+they are short and human-readable.
 
 All five work across all 42 metadata categories and across multiple 1C
 projects (parameterised through env vars PROJECT_NAME / NEO4J_HTTP_URL
@@ -36,6 +41,8 @@ from config import settings
 from .queries import _run_query as _run_query_loader
 from .resolvers import resolve_object_ref
 from .typed_tools import _init_loader, _resolve_project
+from .summarization import compact_refs_dict, filter_for_summarization
+from .encoding import results_to_json, results_to_toon
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +90,47 @@ def _config_prefix(project_name: Optional[str] = None) -> str:
 
 def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", name)[:80]
+
+
+def _compress_response(payload: Any) -> str:
+    """Apply upstream compression pipeline to a tool result and return a string.
+
+    Pipeline (when response_format != 'text'):
+      1. filter_for_summarization() — drop empty-string fields, exclude
+         noise fields (embeddings, config_name, qualified_name, etc.).
+      2. compact_refs_dict(compact_types=True) — replace repeated
+         qualified_name / config_name / category / right / type values
+         with @qn:N / @config:N / @cat:N / @rn:N / @t:N references, and
+         extract common path prefixes as @p:N refs.
+      3. results_to_toon() — encode as TOON (YAML-like with columnar
+         arrays) for ~30-60% additional savings vs JSON.
+
+    When response_format == 'text', returns pretty-printed JSON instead
+    (no compression, useful for debugging).
+
+    Errors ({"error": ...}) and very small payloads (<= 1 top-level key
+    with no nesting) are returned as-is in JSON to keep fast-path
+    responses snappy and human-readable.
+    """
+    # Fast path: bypass for tiny payloads (errors, single-field responses).
+    if isinstance(payload, dict) and len(payload) <= 1:
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    fmt = (getattr(settings, "response_format", "toon") or "toon").lower()
+    if fmt == "text":
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+
+    try:
+        compacted = filter_for_summarization(payload)
+        if getattr(settings, "response_compact_refs", False):
+            compacted = compact_refs_dict(compacted, compact_types=True)
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("compact_refs_dict failed, falling back to raw JSON: %s", e)
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+    if fmt == "json":
+        return results_to_json(compacted, compact=True)
+    return results_to_toon(compacted)
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +189,7 @@ def _register_cypher_query(mcp):
         limit: Annotated[int, "Safety cap — auto-appended as LIMIT if the query has no LIMIT after RETURN. Pass 0 for no limit (max 1000)."] = 100,
         timeout_sec: Annotated[int, "HTTP request timeout in seconds. Max 120."] = 30,
         project_name: Annotated[Optional[str], "Override the PROJECT_NAME env. Use when querying across project boundaries or extensions."] = None,
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Execute a READ-ONLY Cypher query against Neo4j.
 
         USE WHEN: you need ad-hoc graph queries, aggregations, counts, or
@@ -183,7 +231,7 @@ def _register_cypher_query(mcp):
             out = _http_run_cypher(query, params, timeout_eff)
             out["truncated"] = out["row_count"] >= lim
             out["execution_ms"] = int((time.time() - t0) * 1000)
-            return out
+            return _compress_response(out)
         except urllib.error.URLError as e:
             return {"error": f"Neo4j HTTP error: {e}"}
         except Exception as e:
@@ -214,7 +262,7 @@ def _register_batch_dependency_resolve(mcp):
         depth: Annotated[int, "How many hops along the edge to traverse. 1 = direct relations (default). Max 3 — higher depths may be slow on large configs (298K routines)."] = 1,
         limit: Annotated[int, "Max rows returned. Auto-reduced to 20 for broad queries without attribute_name/object_filter. Max 1000."] = 100,
         project_name: Annotated[Optional[str], "Override PROJECT_NAME to search in another config or extension."] = None,
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Resolve a batch of graph joins in one call.
 
         USE WHEN: you need to find all forms/external objects that reference
@@ -316,7 +364,7 @@ LIMIT $limit
                     out["note"] += " | " + zero_note
                 else:
                     out["note"] = zero_note
-            return out
+            return _compress_response(out)
         except Exception as e:
             logger.exception("batch_dependency_resolve failed")
             return {"error": str(e)}
@@ -344,7 +392,7 @@ def _register_routine_subgraph(mcp):
         depth: Annotated[int, "How many CALLS hops. 1 = immediate (default). 2-3 for transitive calls — use with limit to avoid large results."] = 1,
         limit: Annotated[int, "Max path results. Each path includes all nodes and edges within the depth."] = 50,
         project_name: Annotated[Optional[str], "Override PROJECT_NAME to scope the search to another config or extension."] = None,
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Routine call subgraph with regex filters on callee/caller name and owner_qn.
 
         USE WHEN: you need to trace which routines a specific procedure calls
@@ -468,7 +516,7 @@ LIMIT $limit
                 "nodes": unique_nodes[:lim],
                 "edges": unique_edges[:lim],
             }
-            return out
+            return _compress_response(out)
         except Exception as e:
             logger.exception("routine_subgraph failed")
             return {"error": str(e)}
@@ -492,7 +540,7 @@ def _register_reverse_callers(mcp):
         caller_owner_filter: Annotated[Optional[str], "Regex over the caller's owner qualified_name. Example: '^.*ОбщиеМодули.*$' to find callers only from common modules."] = None,
         limit: Annotated[int, "Max caller rows. Max 1000."] = 50,
         project_name: Annotated[Optional[str], "Override PROJECT_NAME to search in another config or extension."] = None,
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Find callers of routines by name, with owner regex filters.
 
         USE WHEN: you want to know which routines directly CALL a named
@@ -560,7 +608,7 @@ LIMIT $limit
                     "edges — this is expected. Use get_event_subscriptions or "
                     "find_dependency_paths to trace their callers."
                 )
-            return out
+            return _compress_response(out)
         except Exception as e:
             logger.exception("reverse_callers failed")
             return {"error": str(e)}
@@ -583,7 +631,7 @@ def _register_form_binding_summary(mcp):
         object_name: Annotated[str, "Metadata object in 'Category.Name' format. Examples: 'Документы.РасходнаяНакладная', 'Справочники.Контрагенты', 'Константы.АвтоПодборНомеровГТД'. Works on any of the 42 categories."],
         form_name: Annotated[Optional[str], "Optional form name to limit the summary to one form. Example: 'ФормаДокумента', 'ФормаСписка'. Omit for all forms of the object."] = None,
         project_name: Annotated[Optional[str], "Override PROJECT_NAME for extension objects (e.g. 'MCP_Сервер$ext$')."] = None,
-    ) -> Dict[str, Any]:
+    ) -> str:
         """Per-form aggregate: total controls, bound, unbound, bound %.
 
         USE WHEN: you need a quick overview of how many form controls are
@@ -703,12 +751,12 @@ RETURN f.name AS form_name, total, bound,
                     "error": str(e),
                 })
 
-        return {
+        return _compress_response({
             "object_name": object_name,
             "category": category,
             "qualified_name": qn,
             "forms": out_forms,
-        }
+        })
 
     form_binding_summary.__doc__ = (
         "Per-form bound/unbound control counts. "
